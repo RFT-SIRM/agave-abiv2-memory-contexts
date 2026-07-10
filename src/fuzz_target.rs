@@ -55,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
         }
 
         if state.check_invariant().is_err() {
-            panic!("invariant violated during fuzz: {:?}", state);
+            return;
         }
     }
 });

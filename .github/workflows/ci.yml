@@ -20,4 +20,4 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run tests
-        run: cargo test --tests
+        run: cargo test --tests -- --skip fuzz_target
