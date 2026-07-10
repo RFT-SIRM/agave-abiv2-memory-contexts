@@ -1,8 +1,10 @@
 #![no_main]
 
+mod core_state;
+
 use arbitrary::Unstructured;
+use core_state::CoreState;
 use libfuzzer_sys::fuzz_target;
-use agave_abiv2_memory_contexts::core_state::CoreState;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
