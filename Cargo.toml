@@ -7,3 +7,11 @@ license = "MIT"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "fuzz_target"
+path = "src/fuzz_target.rs"
