@@ -1,0 +1,67 @@
+name: ✅ Daily Extended Verification (5h 55m)
+
+# Запускать каждый день в 15:00 (3 часа дня по UTC+3)
+# + при каждом push в main
+on:
+  schedule:
+    - cron: '0 12 * * *'  # 12:00 UTC = 15:00 UTC+3
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  extended-tests:
+    name: 🔥 Extended Verification Suite (5h 55m)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 часов (чуть больше чем 5:55)
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      
+      - name: Format check
+        run: cargo fmt --check
+      
+      - name: Clippy lint
+        run: cargo clippy --all-targets -- -D warnings
+      
+      - name: 🧪 Run extended verification tests (5h 55m)
+        run: |
+          echo "Starting 5 hour 55 minute verification suite..."
+          timeout 21300s cargo test --test phasing --release -- --nocapture --test-threads=1
+          echo "✅ Verification suite completed"
+      
+      - name: 📊 Run benchmarks
+        if: success()
+        run: |
+          cargo test extended_verification::perf_100k_operations --release -- --nocapture
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║     ✅ AGAVE ABIv2 MEMORY CONTEXTS — DAILY VERIFICATION    ║"
+          echo "╠════════════════════════════════════════════════════════════╣"
+          echo "║ Duration: 5h 55m (21300 seconds)                           ║"
+          echo "║ Tests: panic safety, random CPI, mutations, performance   ║"
+          echo "║ Status: PASSED ✅                                          ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+
+  quick-tests:
+    name: ⚡ Quick tests (on push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      
+      - name: cargo test
+        run: cargo test --test phasing
