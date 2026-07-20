@@ -1,173 +1,155 @@
 # agave-abiv2-memory-contexts
 
-Alternative ABIv2 `MemoryContexts` implementation for Agave SVM focused on safer permission handling, cleaner region management, and future-proof memory mapping behavior.
+Experimental research module exploring safer per-CPI-frame writable permission
+isolation for the Agave SVM ABIv2 memory context layer.
 
-## Overview
-
-This repository contains an experimental refinement of the Agave SVM ABIv2 memory context implementation.
-![ABIv2 MemoryContexts Architecture](./agave-abiv2-rift-architecture.png.png)
-
-The primary focus is improving correctness and safety around writable account permission handling during nested CPI execution flows while preserving compatibility with the existing ABIv2 execution model.
-
-The implementation introduces:
-
-* Per-frame writable permission rollback
-* Safer region initialization and bounds validation
-* Dynamic region count calculation instead of hardcoded constants
-* Improved error propagation
-* Cleaner ABIv2 region construction flow
-* Better isolation between nested execution frames
-
-The goal is not to redesign the SVM memory model, but to improve correctness and robustness of the existing architecture.
+Developed under the [UltraCore RFT Lab](https://github.com/RFT-SIRM/UltraCore-RFT)
+research framework.
 
 ---
 
-# Motivation
+## Motivation
 
-In the current ABIv2 flow, writable permissions can be updated dynamically during instruction execution.
-
-However, under nested CPI scenarios, writable permission changes may persist across instruction frames unless explicitly restored.
-
-This can potentially create:
-
-* permission leakage between nested calls
-* inconsistent writable state visibility
-* harder-to-debug execution behavior
-* future maintenance complexity for deeper ABIv2 integrations
-
-This repository explores a rollback-safe approach where writable account permissions are restored automatically when execution frames are popped.
+During CPI execution in Agave SVM, a program can modify the writable permission of an
+account and — depending on how `update_account_permissions` is called — that change can
+persist beyond the CPI frame that initiated it. This repository investigates the
+correctness boundary of per-frame rollback and documents a concrete bug found and fixed
+via extended fuzzing.
 
 ---
 
-# Key Improvements
+## Bug found: permission leakage on multiple updates within one frame
 
-## 1. Per-Frame Writable Permission Rollback
+The original implementation cleared the current frame's rollback list on **every** call
+to `update_account_permissions`:
 
-The original implementation updates writable permissions in-place.
+```rust
+let snapshot = self.snapshots.last_mut().unwrap();
+snapshot.entries.clear(); // ← wipes earlier rollback data in the same frame
+```
 
-This implementation stores writable state snapshots before mutation and restores them automatically during frame teardown.
+If a single CPI frame issues more than one permission update before returning, the
+second call erases the rollback record written by the first. On `pop()`, only the
+last-touched account is restored; every earlier account retains its modified permission
+permanently.
 
-### Benefits
+**Reproducing scenario:**
 
-* Prevents writable permission leakage
-* Improves nested CPI isolation
-* Keeps execution frame boundaries deterministic
-* Makes permission transitions explicit and reversible
+```rust
+contexts.push_placeholder();           // open CPI frame
+contexts.update_account_permissions(&[(0, true)]);   // region 0: false → true
+contexts.update_account_permissions(&[(1, true)]);   // region 1: false → true
+                                                      // BUG: region 0 rollback is gone
+contexts.pop();
+// expected: region 0 = ReadOnly, region 1 = ReadOnly
+// actual:   region 0 = Writable  ← leaked
+```
 
----
-
-## 2. Dynamic Region Count
-
-Instead of relying on a hardcoded region count (`392`), region sizing is derived dynamically from VM address layout boundaries.
-
-### Benefits
-
-* Better future compatibility
-* Safer against VM layout evolution
-* Reduces hidden assumptions in memory mapping logic
-
----
-
-## 3. Safer Error Handling
-
-The implementation replaces several panic-prone paths (`unwrap`, `expect`) with structured error propagation using `InstructionError`.
-
-### Benefits
-
-* Prevents unexpected validator panics
-* Improves robustness under malformed states
-* Easier debugging and testing
+**Fix:** record each account's pre-frame value only on its first touch within the
+frame, never overwriting it on subsequent calls. See `src/memory_contexts.rs` and the
+regression test `multiple_permission_updates_in_one_frame_all_roll_back`.
 
 ---
 
-## 4. Cleaner ABIv2 Region Construction
+## CoreState: supply/burn invariant module
 
-ABIv2 region creation is reorganized into a safer and more explicit initialization flow.
+`src/core_state.rs` (used by the fuzz harness only, not exported from `lib.rs`) is an
+independent accounting component enforcing:
 
-### Benefits
+```
+TOTAL_SUPPLY == TOTAL_MINTED - TOTAL_BURNED
+TOTAL_SUPPLY == TOTAL_BASE_SUM + (GLOBAL_FIELD × P)
+```
 
-* Easier auditing
-* Better maintainability
-* Reduced implicit assumptions
-* Clearer separation of memory regions
+Two bugs were found and fixed via fuzzing:
 
----
+1. `unregister_participant` and `apply_transfer` adjusted `total_base_sum` by an
+   arbitrary delta *after* already rebalancing it, without reflecting that delta back
+   into `total_supply` / `total_minted`, breaking the second invariant.
+2. Burn accounting used `saturating_sub`, silently masking the case where burned >
+   minted instead of rejecting it, corrupting the first invariant.
 
-# Design Goals
-
-This repository intentionally avoids introducing architectural changes to the SVM execution model.
-
-The objective is:
-
-* preserve compatibility
-* improve execution safety
-* reduce state leakage risks
-* simplify future ABIv2 evolution
-
-The implementation is designed as a minimal invasive refinement rather than a scheduler or runtime rewrite.
+Both are fixed by computing mint/burn deltas atomically and deriving `total_supply` and
+`total_base_sum` from the validated result in a single step.
 
 ---
 
-# Relation to Scheduler Research
+## Fuzzing results
 
-This work was developed alongside experiments involving contention-aware transaction scheduling for Agave banking_stage.
+Extended CI fuzz run (`cargo fuzz run fuzz_target_1`, libFuzzer + `arbitrary`):
 
-Although independent from scheduling itself, safer memory isolation becomes increasingly important when execution batching and dependency-aware scheduling strategies are introduced.
+| Metric | Value |
+|---|---|
+| Duration | 5 h 55 m (21 300 s) |
+| Total executions | 4 294 967 296+ |
+| Execution speed | ~421 000 exec/s (GitHub Actions vCPU) |
+| RSS (stable) | ~505 MB |
+| Invariant violations | **0** |
+| Panics | **0** |
 
-In particular:
+Each execution applies up to 8 randomised state mutations
+(`register_participant`, `unregister_participant`, `apply_transfer`,
+`redistribute_amount`, `apply_neg_entropy_tick`) and asserts both invariants after
+every step.
 
-* deterministic batching
-* reduced lock churn
-* independent execution groups
-* trusted execution paths
+Coverage stabilised at `cov: 53 ft: 166` by the first billion iterations, indicating
+the harness exhausted the reachable state space for this input size range before the
+run ended.
 
-all benefit from stricter execution-frame memory correctness.
-
----
-
-# Current Status
-
-Experimental / research implementation.
-
-The repository is intended for:
-
-* architecture discussion
-* ABIv2 experimentation
-* nested CPI safety analysis
-* scheduler + memory interaction research
-
-It is not production-ready validator code.
+> **Note on the figures above.** These numbers describe the fuzz harness on an isolated
+> in-memory struct. They are not SVM transaction throughput figures and should not be
+> compared to validator TPS benchmarks.
 
 ---
 
-# Potential Future Work
+## Repository layout
 
-Possible areas for future exploration:
-
-* per-frame region allocators
-* immutable sysvar snapshots
-* trusted batch memory fast-paths
-* arena-based allocation strategies
-* tighter scheduler ↔ memory integration
-* lock-aware memory locality optimizations
-
----
-
-# Testing Focus
-
-The implementation was tested primarily against:
-
-* nested CPI flows
-* writable permission restoration
-* repeated instruction frame transitions
-* ABIv2 region initialization consistency
-
-Additional stress testing and benchmarking are still required.
+```
+src/
+  lib.rs                    — public API: memory_contexts, scheduler, shared_memory_protocol
+  memory_contexts.rs        — per-frame writable permission tracking (bug + fix documented above)
+  scheduler.rs              — conflict-aware transaction scheduling research
+  shared_memory_protocol.rs — TPU/worker shared-memory message layouts
+  core_state.rs             — standalone supply/mint/burn accounting (fuzz-only)
+tests/
+  integration_tests.rs      — integration and regression tests
+fuzz/
+  fuzz_targets/fuzz_target_1.rs — stateful invariant fuzzer
+.github/workflows/          — CI: fast checks on push, 5h 55m fuzz on schedule
+```
 
 ---
 
-# Repository Purpose
+## Running tests and fuzzing
 
-This repository exists primarily as a technical exploration of safer ABIv2 memory semantics inside Agave SVM.
+```bash
+# unit + integration tests
+cargo test
 
-Feedback, corrections, and architecture discussion are welcome.
+# 5-minute local fuzz run
+cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=300
+
+# full scheduled run (matches CI)
+cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=21300
+```
+
+---
+
+## Status and next steps
+
+This is a research repository, not a production patch. The immediate goal is to:
+
+1. Integrate `MemoryContexts` into a fork of
+   [`anza-xyz/svm`](https://github.com/anza-xyz/svm) (`transaction-context` crate) to
+   measure per-CPI-frame rollback cost against their existing benchmarks.
+2. Open a focused RFC / Draft PR against `solana-transaction-context` with `cargo bench`
+   before/after numbers and the fuzz corpus as evidence.
+
+Architectural context and theoretical foundations:
+[UltraCore RFT — Development Strategy](https://github.com/RFT-SIRM/UltraCore-RFT/blob/main/RFT_DEVELOPMENT_STRATEGY.md)
+
+---
+
+## License
+
+Apache-2.0
