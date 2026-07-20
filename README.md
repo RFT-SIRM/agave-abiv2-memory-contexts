@@ -5,8 +5,7 @@ Alternative ABIv2 `MemoryContexts` implementation for Agave SVM focused on safer
 ## Overview
 
 This repository contains an experimental refinement of the Agave SVM ABIv2 memory context implementation.
-
-![ABIv2 MemoryContexts Architecture](./agave-abiv2-rift-architecture.png.png
+![ABIv2 MemoryContexts Architecture](./agave-abiv2-rift-architecture.png.png)
 
 The primary focus is improving correctness and safety around writable account permission handling during nested CPI execution flows while preserving compatibility with the existing ABIv2 execution model.
 
