@@ -212,8 +212,7 @@ Upstream issue: [anza-xyz/svm#25](https://github.com/anza-xyz/svm/issues/25)
 ## 📋 License
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-eab308?style=for-the-badge)](LICENSE)
-
-Licensed under **[Apache License 2.0](LICENSE)** — see [LICENSE](LICENSE) for details.
+ **[Apache License 2.0](LICENSE)** 
 
 * * *
 
