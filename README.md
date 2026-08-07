@@ -5,34 +5,46 @@
 [![Upstream](https://img.shields.io/badge/Upstream-svm%2325-3b82f6?style=for-the-badge)](https://github.com/anza-xyz/svm/issues/25)
 [![License](https://img.shields.io/badge/License-Apache%202.0-eab308?style=for-the-badge)](LICENSE)
 
-**SVM Memory Isolation Research · CPI Permission Leakage Mitigation · Complementary Runtime**
+**SVM Memory Isolation Research · CPI Permission Model · Fuzzing Methodology**
 
 _Part of the [UltraCore RFT](https://github.com/RFT-SIRM/UltraCore-RFT) execution platform_
 
 * * *
 
+## ⚠️ Important Update (August 2026)
+
+This repository contains a **proof-of-concept implementation** of ABIv2 MemoryContexts, created for research and fuzzing methodology development.
+
+**The `snapshot.entries.clear()` bug described below was present only in this PoC** and does **not** exist in the official `anza-xyz/agave-runtime/feat/abiv2`. The upstream team (notably @LucasSte) redesigned the architecture to use `abi_v2_prepare_for_instruction()` with explicit `make_immutable()`, which correctly resets permissions at every instruction boundary. A regression test for CPI writable-permission leakage passes in the official repository.
+
+This repository is preserved as a **reference for the fuzzing methodology** demonstrated here (stateful invariant checking, 4.3B+ iterations) and for the CoreState accounting module. The permission-rollback PoC itself is superseded by the official implementation.
+
+* * *
+
 ## 🎯 Overview
 
-This repository investigates the correctness boundary of per-CPI-frame writable permission rollback in the Agave Solana Virtual Machine (SVM). It documents a concrete permission-leakage bug, provides a fix, and validates the solution through extended deterministic fuzzing.
+This repository was created to investigate the correctness boundary of per-CPI-frame writable permission rollback in a **custom ABIv2 MemoryContexts prototype**. It documents a bug found in that prototype, provides a fix, and validates the solution through extended deterministic fuzzing.
+
+The architectural approach here (snapshot-based rollback) differs from the official `agave-runtime/feat/abiv2` design (per-instruction reconfiguration via `abi_v2_prepare_for_instruction`). This PoC should be read as a research artifact, not as a patch proposal for upstream.
 
 ```mermaid
 flowchart LR
-    subgraph SVM["Agave SVM"]
+    subgraph PoC["PoC MemoryContexts"]
         CPI["CPI Frame"]
         PERM["Account Permissions"]
     end
-    subgraph BUG["Bug: Permission Leakage"]
+    subgraph BUG["Bug in PoC: Permission Leakage"]
         UPD1["update_account_permissions<br/>region 0: false→true"]
         UPD2["update_account_permissions<br/>region 1: false→true"]
         CLR["snapshot.entries.clear()<br/>← wipes rollback data"]
         POP["pop()"]
-        LEAK["region 0 stays Writable<br/>🔴 LEAKED"]
+        LEAK["region 0 stays Writable<br/>🔴 LEAKED (in PoC only)"]
     end
     subgraph FIX["Fix: Per-Frame First-Touch"]
         FT["record on FIRST touch only"]
         RB["rollback all regions<br/>🟢 RESTORED"]
     end
-    SVM --> BUG
+    PoC --> BUG
     BUG --> FIX
 ```
 
@@ -40,17 +52,17 @@ flowchart LR
 
 ## 🔬 Motivation
 
-During CPI execution in Agave SVM, a program can modify the writable permission of an account and — depending on how `update_account_permissions` is called — that change can persist beyond the CPI frame that initiated it.
+During research into CPI execution semantics, this PoC explored whether a snapshot-based rollback mechanism could correctly isolate writable permission changes across nested CPI frames. The investigation revealed a bug in the prototype's implementation and validated a fix through fuzzing.
 
-This repository investigates the correctness boundary of per-frame rollback and documents a concrete bug found and fixed via extended fuzzing.
+**Note:** The official `agave-runtime/feat/abiv2` uses a different, non-snapshot-based mechanism that does not exhibit this bug.
 
 * * *
 
-## 🐛 Bug Found: Permission Leakage on Multiple Updates Within One Frame
+## 🐛 Bug Found in PoC: Permission Leakage on Multiple Updates Within One Frame
 
-### The Problem
+### The Problem (PoC-only)
 
-The original implementation cleared the current frame's rollback list on **every** call to `update_account_permissions`:
+The prototype implementation cleared the current frame's rollback list on **every** call to `update_account_permissions`:
 
 ```rust
 let snapshot = self.snapshots.last_mut().unwrap();
@@ -68,7 +80,7 @@ contexts.update_account_permissions(&[(1, true)]);    // region 1: false → tru
                                                       // BUG: region 0 rollback is gone
 contexts.pop();
 // expected: region 0 = ReadOnly, region 1 = ReadOnly
-// actual:   region 0 = Writable  ← leaked
+// actual:   region 0 = Writable  ← leaked (in PoC only)
 ```
 
 ### The Fix
@@ -77,7 +89,7 @@ Record each account's pre-frame value **only on its first touch** within the fra
 
 ```mermaid
 flowchart TB
-    subgraph BEFORE["❌ Before (Bug)"]
+    subgraph BEFORE["❌ Before (Bug in PoC)"]
         B1["touch region 0 → record rollback"]
         B2["touch region 1 → clear() → record rollback"]
         B3["pop() → restore region 1 ONLY"]
@@ -157,7 +169,7 @@ Coverage stabilised at `cov: 53 ft: 166` by the first billion iterations, indica
 ```
 src/
   lib.rs                    — public API: memory_contexts, scheduler, shared_memory_protocol
-  memory_contexts.rs        — per-frame writable permission tracking (bug + fix documented above)
+  memory_contexts.rs        — per-frame writable permission tracking (PoC, bug + fix documented above)
   scheduler.rs              — conflict-aware transaction scheduling research
   shared_memory_protocol.rs — TPU/worker shared-memory message layouts
   core_state.rs             — standalone supply/mint/burn accounting (fuzz-only)
@@ -187,14 +199,15 @@ cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=21300
 
 ## 🔮 Status and Next Steps
 
-This is a **research repository**, not a production patch. The immediate goal is to:
+This is a **research repository**, not a production patch. The immediate goals are:
 
-1. **Integrate** `MemoryContexts` into a fork of `anza-xyz/svm` (transaction-context crate) to measure per-CPI-frame rollback cost against their existing benchmarks.
-2. **Open a focused RFC / Draft PR** against `solana-transaction-context` with `cargo bench` before/after numbers and the fuzz corpus as evidence.
+1. **Archive the permission-rollback PoC** — the official `agave-runtime/feat/abiv2` has superseded this approach with `abi_v2_prepare_for_instruction()` + `make_immutable()`.
+2. **Preserve the fuzzing methodology** — the 4.3B-execution invariant harness and CoreState module remain valuable for future research on other Solana runtime components.
+3. **Continue research** — focusing on upstream `agave-runtime` components (instruction account deduplication, VM error paths, scheduler internals) with tests against the actual codebase.
 
 Architectural context and theoretical foundations: [UltraCore RFT](https://github.com/RFT-SIRM/UltraCore-RFT)
 
-Upstream issue: [anza-xyz/svm#25](https://github.com/anza-xyz/svm/issues/25)
+Upstream reference: [anza-xyz/svm#25](https://github.com/anza-xyz/svm/issues/25) (closed — bug was PoC-only)
 
 * * *
 
